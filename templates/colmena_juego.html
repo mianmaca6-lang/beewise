@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
+    <title>Zine - Evolución</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐝</text></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <link href="{{ url_for('static', path='/css/output.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', path='/css/colmena.css') }}" rel="stylesheet">
+
+    <style>
+        .colmena-pos {
+            position: absolute;
+            top: 15vh;
+            left: 20vw;
+            max-height: 180px;
+            width: auto;
+        }
+        @media (min-width: 768px) {
+            .colmena-pos {
+                top: 22vh;
+                left: 7vw;
+                max-height: 280px;
+            }
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="overflow-hidden bg-tinta-900 font-sans antialiased text-white select-none relative h-screen w-screen" data-nivel-inicial="{{ nivel_inicial }}">
+    
+    <!-- CAPA 0: Fondo Paisaje -->
+    <div class="absolute inset-0 z-0">
+        <img src="{{ url_for('static', path='/img/colmena/Paisaje campestre con gran árbol.png') }}" 
+             class="w-full h-full object-cover object-bottom md:object-center" alt="Paisaje campestre">
+        <div class="absolute inset-0 bg-tinta-900/15"></div>
+    </div>
+
+    <!-- CAPA 1: Colmena con clase responsiva -->
+    <div class="absolute inset-0 z-10 pointer-events-none">
+        <img id="img-colmena" 
+             src="{{ url_for('static', path='/img/colmena/Colmena dorada colgando de una rama.png') }}" 
+             class="colmena-pos colmena-flotante object-contain drop-shadow-2xl cursor-pointer pointer-events-auto transition-all duration-500 origin-top" 
+             alt="Colmena Silvestre">
+    </div>
+    
+    <!-- CAPA 2: Contenedor del Enjambre Dinámico -->
+    <div id="contenedor-abejas" class="absolute inset-0 z-20 pointer-events-none overflow-hidden"></div>
+
+    <!-- CAPA 3: Interfaz HUD -->
+    <div class="absolute inset-0 z-30 pointer-events-none p-4 md:p-8 flex flex-col justify-between">
+        
+        <!-- Barra Superior -->
+        <div class="flex flex-row items-start justify-between pointer-events-auto gap-2">
+            <!-- Indicador de Nivel -->
+            <div class="apple-glass apple-glass-hover flex items-center gap-2 md:gap-3.5 rounded-2xl p-2 md:p-3.5 shadow-xl">
+                <div class="flex h-9 w-9 md:h-11 md:w-11 items-center justify-center rounded-xl bg-miel-500/20 border border-miel-400/30 text-lg md:text-xl shadow-inner">🍯</div>
+                <div class="pr-1 md:pr-2">
+                    <h2 id="hud-nivel" class="text-sm md:text-base font-bold text-miel-300 tracking-tight leading-tight">Nivel 1</h2>
+                    <p id="hud-desc" class="text-[9px] md:text-[11px] font-medium tracking-wider text-stone-300 uppercase mt-0.5">Silvestre</p>
+                </div>
+            </div>
+            
+            <!-- Botones de Acción -->
+            <div class="flex items-center gap-2 md:gap-3">
+                <button id="btn-abrir-graficas" class="apple-glass apple-glass-hover text-stone-100 font-semibold px-3 py-2.5 md:px-4 md:py-3 rounded-2xl text-[11px] md:text-xs tracking-wide flex items-center gap-1.5 shadow-xl">
+                     <span class="text-emerald-400 text-sm">📊</span> <span class="hidden md:inline">Balance</span><span class="md:hidden">Balance</span>
+                </button>
+
+                <button id="btn-abrir-modal" class="apple-glass apple-glass-hover text-stone-100 font-semibold px-3 py-2.5 md:px-4 md:py-3 rounded-2xl text-[11px] md:text-xs tracking-wide flex items-center gap-1.5 shadow-xl">
+                    <span class="text-miel-400 text-sm">✦</span> <span class="hidden md:inline">Registrar Gasto</span><span class="md:hidden">Registrar</span>
+                </button>
+                <a href="#" class="apple-glass apple-glass-hover text-stone-300 hover:text-white rounded-2xl p-2.5 md:p-3 text-xs font-medium transition flex items-center justify-center shadow-xl">
+                    <span>✕</span>
+                </a>
+            </div>
+        </div>
+
+        <!-- Botón Inferior de Evolución -->
+        <div class="flex justify-center pb-4 md:pb-10 pointer-events-auto">
+            <button id="btn-evolucionar" class="apple-button-primary text-[10px] md:text-sm uppercase tracking-widest py-3 px-8 md:py-4 md:px-10 rounded-full transition shadow-2xl">
+                Evolucionar Colmena
+            </button>
+        </div>
+    </div>
+
+    <!-- MODAL DE REGISTRO MANUAL (Z-index forzado para tapar la colmena) -->
+    <div id="modal-registro" style="z-index: 9999;" class="fixed inset-0 flex items-center justify-center bg-black/70 backdrop-blur-md hidden pointer-events-auto transition-all p-4">
+        <div class="apple-modal rounded-3xl p-5 md:p-8 w-full max-w-md shadow-2xl relative max-h-[90vh] overflow-y-auto">
+            <div class="flex items-center justify-between pb-3 md:pb-4 border-b border-white/10 mb-5 md:mb-6">
+                <div class="flex items-center gap-3">
+                    <span class="flex h-8 w-8 md:h-9 md:w-9 items-center justify-center rounded-xl bg-miel-500/20 text-sm md:text-base border border-miel-400/30">📝</span>
+                    <h3 class="text-sm md:text-base font-semibold text-white tracking-tight">Nuevo Registro</h3>
+                </div>
+                <button id="btn-cerrar-modal" class="text-stone-400 hover:text-white text-sm font-bold p-2 transition">✕</button>
+            </div>
+
+            <form id="form-gasto" class="space-y-3 md:space-y-4">
+                <div>
+                    <label class="block text-[10px] md:text-[11px] font-medium uppercase tracking-wider text-stone-400 mb-1 md:mb-1.5">Concepto</label>
+                    <input type="text" id="input-concepto" required placeholder="Ej. Gasolina, Insumos..." 
+                           class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 md:py-3 text-xs md:text-sm text-white placeholder-stone-500 focus:outline-none focus:border-miel-400/60 focus:bg-white/10 transition">
+                </div>
+                <div>
+                    <label class="block text-[10px] md:text-[11px] font-medium uppercase tracking-wider text-stone-400 mb-1 md:mb-1.5">Monto ($)</label>
+                    <input type="number" id="input-monto" required placeholder="0.00" 
+                           class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 md:py-3 text-xs md:text-sm text-white placeholder-stone-500 focus:outline-none focus:border-miel-400/60 focus:bg-white/10 transition">
+                </div>
+                <div>
+                    <label class="block text-[10px] md:text-[11px] font-medium uppercase tracking-wider text-stone-400 mb-1 md:mb-1.5">Comprobante</label>
+                    <input type="file" id="input-archivo" 
+                           class="w-full text-[10px] md:text-xs text-stone-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-[10px] md:file:text-xs file:font-semibold file:bg-white/10 file:text-miel-300 hover:file:bg-white/20 cursor-pointer transition">
+                </div>
+
+                <button type="submit" class="w-full mt-3 apple-button-primary text-[10px] md:text-xs uppercase tracking-wider py-3 md:py-4 rounded-xl shadow-lg transition">
+                    Guardar Registro
+                </button>
+            </form>
+        </div>
+    </div>
+        <!-- MODAL DE GRÁFICAS FINANCIERAS -->
+    <div id="modal-graficas" style="z-index: 9999;" class="fixed inset-0 flex items-center justify-center bg-black/70 backdrop-blur-md hidden pointer-events-auto transition-all p-4">
+        <div class="apple-modal rounded-3xl p-5 md:p-8 w-full max-w-lg shadow-2xl relative">
+            <div class="flex items-center justify-between pb-3 md:pb-4 border-b border-white/10 mb-5 md:mb-6">
+                <div class="flex items-center gap-3">
+                    <span class="flex h-8 w-8 md:h-9 md:w-9 items-center justify-center rounded-xl bg-emerald-500/20 text-sm md:text-base border border-emerald-400/30">📈</span>
+                    <h3 class="text-sm md:text-base font-semibold text-white tracking-tight">Radiografía Financiera</h3>
+                </div>
+                <button id="btn-cerrar-graficas" class="text-stone-400 hover:text-white text-sm font-bold p-2 transition">✕</button>
+            </div>
+            <!-- Contenedor del Canvas de Chart.js -->
+            <div class="relative w-full h-64 md:h-80">
+                <canvas id="chart-finanzas"></canvas>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- MODAL DE LOGIN (PANTALLA DE BLOQUEO TELEMETRÍA) -->
+    <div id="modal-login" style="z-index: 99999; background-color: rgba(28, 25, 23, 0.55); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);" class="fixed inset-0 flex items-center justify-center pointer-events-auto transition-opacity duration-500"> 
+        <div class="apple-modal rounded-3xl p-8 w-full max-w-sm shadow-2xl relative mx-4 text-center border border-white/10">
+            <div class="text-5xl mb-4">🐝</div>
+            <h2 class="text-xl font-bold text-white tracking-tight mb-1">Acceso Restringido</h2>
+            <p class="text-xs text-stone-400 mb-6">Ingresa tu clave de tester para entrar a la Colmena.</p>
+            
+            <form id="form-login" class="space-y-4">
+                <input type="text" id="input-token" required placeholder="Ej. tester01" 
+                    class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-center text-white placeholder-stone-500 focus:outline-none focus:border-miel-400/60 focus:bg-white/10 transition uppercase">
+                <button type="submit" class="w-full apple-button-primary text-xs uppercase tracking-wider py-4 rounded-xl shadow-lg transition">
+                    Entrar al Enjambre
+                </button>
+            </form>
+            <p id="login-error" class="text-red-400 text-xs font-medium mt-4 hidden">Código inválido. Intenta de nuevo.</p>
+        </div>
+    </div>  
+    <script src="{{ url_for('static', path='/js/colmena.js') }}"></script>
+</body>
+</html>

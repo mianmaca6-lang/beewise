@@ -1,0 +1,10 @@
+{
+  "creado_utc": "2026-11-13T19:02:28.810420+00:00",
+  "origen": "/home/migue/Descargas/beewise-ultimo/App/data/colmena.db",
+  "archivo": "colmena_20261113T190227145658Z_pre-0003-socios.db",
+  "bytes": 196608,
+  "sha256": "c11b391ec5a31e541f31fa6d04735315031ee10b084cbe2f4acbfb4631d0857c",
+  "integrity_check": "ok",
+  "etiqueta": "pre-0003-socios",
+  "nota": "Los registros personales requieren COLMENA_CLAVE_CIFRADO para leerse."
+}

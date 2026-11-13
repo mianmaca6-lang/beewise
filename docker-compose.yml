@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  api_colmena:
+    build: .
+    container_name: colmena_backend
+    restart: always
+    env_file: .env
+    ports:
+      - "8001:8001"
+    
+    volumes:
+      # Protege la base de datos
+      - ./data:/app/data
+      # Respaldos de SQLite (fuera del control de versiones)
+      - ./backups:/app/backups
+      # Llave de la cuenta de servicio Soroban (archivo, solo lectura). Nunca en la imagen.
+      - ./secrets:/app/secrets:ro
+      # Protege los archivos crudos y transcripciones
+      - ./Base Datos:/app/Base Datos
+    

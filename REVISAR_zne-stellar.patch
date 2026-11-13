@@ -1,0 +1,896 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..6fa6b10
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,14 @@
++# Copiar a .env y completar. NUNCA subir .env ni claves secretas.
++COLMENA_API_TOKEN=cambiar_por_un_token_largo
++N8N_BASE_URL=http://n8n:5678
++N8N_API_TOKEN=
++N8N_TIMEOUT=10
++STELLAR_NETWORK=testnet
++STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
++STELLAR_CUENTA_MULTISIG=
++# Tres llaves publicas (G...) separadas por coma
++STELLAR_SOCIOS=
++STELLAR_UMBRAL=2
++APROBACION_TTL_HORAS=72
++# Solo para scripts/stellar_setup.py (exportar en la terminal, no guardar aqui):
++# STELLAR_SETUP_SECRET, y SOCIO_SECRET para scripts/stellar_firmar.py
+diff --git a/Dockerfile b/Dockerfile
+index 629370b..a035a65 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -23,7 +23,7 @@ RUN mkdir -p /app/data /app/"Base Datos"/input /app/"Base Datos"/check
+ COPY . /app/
+ 
+ # Exponer el puerto para FastAPI
+-EXPOSE 8000
++EXPOSE 8001
+ 
+ # Ejecutar el servidor
+-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+\ No newline at end of file
++CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001", "--proxy-headers"]
+\ No newline at end of file
+diff --git a/README.md b/README.md
+index 42c30ae..95ce18e 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1,29 @@
+-# Blockchain-ZNE
+\ No newline at end of file
++# Blockchain-ZNE
++
++## Aprobaciones multifirma en Stellar (2 de 3)
++
++Puerto de la API: **8001** (`docker compose up --build`). Copia `.env.example` a `.env` y completa:
++
++| Variable | Descripción |
++|---|---|
++| `COLMENA_API_TOKEN` | Token para el header `X-Api-Token` |
++| `N8N_BASE_URL`, `N8N_API_TOKEN`, `N8N_TIMEOUT` | Conexión a n8n (`/webhook/{workflow}`) |
++| `STELLAR_NETWORK` | `testnet` (por defecto) o `public` |
++| `STELLAR_HORIZON_URL` | URL de Horizon |
++| `STELLAR_CUENTA_MULTISIG` | Cuenta pública (G...) con los 3 socios como firmantes |
++| `STELLAR_SOCIOS` | Exactamente 3 llaves públicas separadas por coma |
++| `STELLAR_UMBRAL` | Firmas requeridas (por defecto 2) |
++| `APROBACION_TTL_HORAS` | Vigencia de la aprobación (por defecto 72) |
++
++Las llaves secretas nunca se guardan en el servidor ni en disco.
++
++Configuración inicial (una sola vez, fuera del servidor):
++`STELLAR_SETUP_SECRET=S... STELLAR_SOCIOS=G1,G2,G3 python scripts/stellar_setup.py`
++
++Flujo:
++1. `POST /api/aprobaciones` con `{"registro_id": 1, "monto": 1000}` crea la aprobación y devuelve `xdr_base`.
++2. Cada socio firma localmente: `SOCIO_SECRET=S... python scripts/stellar_firmar.py "<xdr_base>"`.
++3. Se sube cada XDR firmado con `POST /api/aprobaciones/{id}/firmas` (`{"xdr_firmado": "..."}`).
++4. Con 2 firmas válidas el estado pasa a `aprobada`; `POST /api/aprobaciones/{id}/enviar` la envía a Horizon.
++
++Solo puede haber una aprobación abierta a la vez (comparten el número de secuencia de la cuenta).
+diff --git a/app/main.py b/app/main.py
+index f76a2a4..94bb072 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -7,7 +7,7 @@ import os
+ # 1. Importar la base de datos, los modelos y los enrutadores
+ from .database import engine
+ from . import models
+-from .routers import webhooks, dashboard, reglas
++from .routers import webhooks, dashboard, reglas, facturas, aprobaciones
+ # 2. Crear las tablas en SQLite automáticamente si no existen
+ models.Base.metadata.create_all(bind=engine)
+ 
+@@ -17,6 +17,8 @@ app = FastAPI(title="Colmena Financiera")
+ app.include_router(webhooks.router)
+ app.include_router(dashboard.router)
+ app.include_router(reglas.router)
++app.include_router(facturas.router)
++app.include_router(aprobaciones.router)
+ # 4. Resolución de ruta absoluta para la carpeta static (sin la 's')
+ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ RUTA_STATIC = os.path.join(BASE_DIR, "static")
+diff --git a/app/models.py b/app/models.py
+index 3614682..d9e85b8 100644
+--- a/app/models.py
++++ b/app/models.py
+@@ -1,7 +1,7 @@
+-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Float
++from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Float, Text, UniqueConstraint
+ from sqlalchemy.orm import relationship
+ from .database import Base
+-from datetime import datetime
++from datetime import datetime, timezone
+ 
+ class Cliente(Base):
+     __tablename__ = "clientes"
+@@ -76,4 +76,47 @@ class Transaccion(Base):
+     tipo = Column(String)                       # "ingreso" o "gasto"
+     cuenta_origen = Column(String)              # De dónde sale el dinero (Ej. "Bolsillo", "Banco")
+     cuenta_destino = Column(String)             # A dónde va (Ej. "Gasto Comida", "Ahorros")
+-    fecha_hora = Column(String, default=lambda: datetime.now().isoformat())
+\ No newline at end of file
++    fecha_hora = Column(String, default=lambda: datetime.now().isoformat())
++
++
++def _ahora_iso():
++    return datetime.now(timezone.utc).isoformat()
++
++
++class Aprobacion(Base):
++    """
++    Aprobación multifirma (2 de 3) de una factura en Stellar.
++    Solo se guardan XDR y firmas públicas; jamás llaves secretas.
++    """
++    __tablename__ = "aprobaciones"
++
++    id = Column(Integer, primary_key=True, index=True)
++    registro_id = Column(Integer, ForeignKey("registros_archivos.id"), unique=True, nullable=False)
++    factura_hash = Column(String(64), nullable=False)
++    monto = Column(Float, default=0.0)
++    tx_hash = Column(String, unique=True, nullable=False)
++    xdr_base = Column(Text, nullable=False)
++    cuenta_origen = Column(String, nullable=False)
++    red = Column(String, nullable=False)
++    estado = Column(String, default="pendiente")  # pendiente, parcial, aprobada, enviada, error
++    umbral = Column(Integer, default=2)
++    error_detalle = Column(String, nullable=True)
++    expira_en = Column(String, nullable=False)
++    horizon_hash = Column(String, nullable=True)
++    creado_en = Column(String, default=_ahora_iso)
++    actualizado_en = Column(String, default=_ahora_iso, onupdate=_ahora_iso)
++
++    firmas = relationship("FirmaAprobacion", back_populates="aprobacion", cascade="all, delete-orphan")
++
++
++class FirmaAprobacion(Base):
++    __tablename__ = "firmas_aprobacion"
++    __table_args__ = (UniqueConstraint("aprobacion_id", "public_key", name="uq_firma_aprobacion_socio"),)
++
++    id = Column(Integer, primary_key=True, index=True)
++    aprobacion_id = Column(Integer, ForeignKey("aprobaciones.id"), nullable=False)
++    public_key = Column(String, nullable=False)
++    firma_b64 = Column(String, nullable=False)
++    creado_en = Column(String, default=_ahora_iso)
++
++    aprobacion = relationship("Aprobacion", back_populates="firmas")
+diff --git a/app/routers/aprobaciones.py b/app/routers/aprobaciones.py
+new file mode 100644
+index 0000000..15d0250
+--- /dev/null
++++ b/app/routers/aprobaciones.py
+@@ -0,0 +1,189 @@
++from datetime import datetime, timedelta, timezone
++from typing import Optional
++
++from fastapi import APIRouter, Depends, Header, HTTPException, Response
++from sqlalchemy.exc import IntegrityError
++from sqlalchemy.orm import Session
++
++from ..database import get_db
++from ..models import Aprobacion, FirmaAprobacion, RegistroArchivo
++from ..schemas import AprobacionCrearIn, AprobacionOut, FirmaIn
++from ..seguridad import verificar_token
++from ..services import stellar_aprobaciones as stellar
++
++router = APIRouter(prefix="/api/aprobaciones", tags=["Aprobaciones Stellar"])
++
++ESTADOS_ABIERTOS = ("pendiente", "parcial", "aprobada")
++
++
++def _token(x_api_token: Optional[str] = Header(None)) -> None:
++    verificar_token(x_api_token)
++
++
++def _config() -> stellar.StellarConfig:
++    try:
++        return stellar.cargar_config()
++    except stellar.ConfigError as exc:
++        raise HTTPException(status_code=503, detail=f"Configuración Stellar inválida: {exc}")
++
++
++def _salida(a: Aprobacion) -> AprobacionOut:
++    return AprobacionOut(
++        id=a.id,
++        registro_id=a.registro_id,
++        estado=a.estado,
++        umbral=a.umbral,
++        firmas_validas=len(a.firmas),
++        firmantes=[f.public_key for f in a.firmas],
++        tx_hash=a.tx_hash,
++        xdr_base=a.xdr_base,
++        expira_en=a.expira_en,
++        horizon_hash=a.horizon_hash,
++        error_detalle=a.error_detalle,
++        red=a.red,
++    )
++
++
++def _obtener(db: Session, aprobacion_id: int) -> Aprobacion:
++    a = db.get(Aprobacion, aprobacion_id)
++    if a is None:
++        raise HTTPException(status_code=404, detail="Aprobación no encontrada")
++    return a
++
++
++def _marcar_expirada_si_aplica(db: Session, a: Aprobacion) -> bool:
++    if a.estado != "enviada" and stellar.expirada(a):
++        if a.estado != "error":
++            a.estado = "error"
++            a.error_detalle = "expirada"
++            db.commit()
++            db.refresh(a)
++        return True
++    return False
++
++
++@router.post("", response_model=AprobacionOut, status_code=201, dependencies=[Depends(_token)])
++def crear_aprobacion(datos: AprobacionCrearIn, response: Response, db: Session = Depends(get_db)):
++    registro = db.get(RegistroArchivo, datos.registro_id)
++    if registro is None:
++        raise HTTPException(status_code=404, detail="Factura no encontrada")
++
++    existente = db.query(Aprobacion).filter(Aprobacion.registro_id == datos.registro_id).first()
++    if existente is not None:
++        response.status_code = 200
++        return _salida(existente)
++
++    abierta = db.query(Aprobacion).filter(Aprobacion.estado.in_(ESTADOS_ABIERTOS)).first()
++    if abierta is not None:
++        raise HTTPException(
++            status_code=409,
++            detail=f"Ya hay una aprobación abierta (id {abierta.id}); comparten el número de secuencia de la cuenta",
++        )
++
++    cfg = _config()
++    f_hash = stellar.hash_factura(registro, datos.monto)
++    try:
++        env = stellar.construir_tx(cfg, registro.id, f_hash)
++    except stellar.StellarError as exc:
++        raise HTTPException(status_code=502, detail=str(exc))
++
++    expira = datetime.now(timezone.utc) + timedelta(hours=cfg.ttl_horas)
++    a = Aprobacion(
++        registro_id=registro.id,
++        factura_hash=f_hash,
++        monto=datos.monto,
++        tx_hash=env.hash_hex(),
++        xdr_base=env.to_xdr(),
++        cuenta_origen=cfg.cuenta,
++        red=cfg.red,
++        estado="pendiente",
++        umbral=cfg.umbral,
++        expira_en=expira.isoformat(),
++    )
++    db.add(a)
++    try:
++        db.commit()
++    except IntegrityError:
++        db.rollback()
++        raise HTTPException(status_code=409, detail="Aprobación duplicada para esta factura")
++    db.refresh(a)
++    return _salida(a)
++
++
++@router.post("/{aprobacion_id}/firmas", response_model=AprobacionOut, dependencies=[Depends(_token)])
++def subir_firma(aprobacion_id: int, datos: FirmaIn, db: Session = Depends(get_db)):
++    a = _obtener(db, aprobacion_id)
++    if a.estado == "enviada":
++        raise HTTPException(status_code=409, detail="La aprobación ya fue enviada")
++    if _marcar_expirada_si_aplica(db, a):
++        raise HTTPException(status_code=409, detail="La aprobación expiró")
++    if a.estado == "error":
++        raise HTTPException(status_code=409, detail=f"Aprobación en error: {a.error_detalle}")
++
++    cfg = _config()
++    try:
++        public_key, firma_b64 = stellar.validar_firma(cfg, a, datos.xdr_firmado)
++    except stellar.FirmaInvalida as exc:
++        raise HTTPException(status_code=400, detail=str(exc))
++
++    if not any(f.public_key == public_key for f in a.firmas):
++        db.add(FirmaAprobacion(aprobacion_id=a.id, public_key=public_key, firma_b64=firma_b64))
++        try:
++            db.commit()
++        except IntegrityError:
++            db.rollback()  # carrera: el mismo socio ya firmó; es idempotente
++        db.refresh(a)
++
++    nuevo = stellar.calcular_estado(a, len(a.firmas))
++    if nuevo != a.estado:
++        a.estado = nuevo
++        db.commit()
++        db.refresh(a)
++    return _salida(a)
++
++
++@router.get("/{aprobacion_id}", response_model=AprobacionOut, dependencies=[Depends(_token)])
++def obtener_aprobacion(aprobacion_id: int, db: Session = Depends(get_db)):
++    a = _obtener(db, aprobacion_id)
++    _marcar_expirada_si_aplica(db, a)
++    return _salida(a)
++
++
++@router.post("/{aprobacion_id}/enviar", response_model=AprobacionOut, dependencies=[Depends(_token)])
++def enviar_aprobacion(aprobacion_id: int, db: Session = Depends(get_db)):
++    a = _obtener(db, aprobacion_id)
++    if a.estado == "enviada":
++        return _salida(a)
++    if _marcar_expirada_si_aplica(db, a):
++        raise HTTPException(status_code=409, detail="La aprobación expiró")
++    if a.estado != "aprobada":
++        raise HTTPException(status_code=409, detail=f"La aprobación está '{a.estado}', se requiere 'aprobada'")
++
++    cfg = _config()
++    try:
++        horizon_hash = stellar.enviar(cfg, a)
++    except stellar.StellarError as exc:
++        detalle = str(exc)
++        if not exc.definitivo:
++            # Fallo ambiguo: puede que Horizon sí haya recibido la tx
++            try:
++                if stellar.existe_en_horizon(cfg, a.tx_hash):
++                    a.estado = "enviada"
++                    a.horizon_hash = a.tx_hash
++                    a.error_detalle = None
++                    db.commit()
++                    db.refresh(a)
++                    return _salida(a)
++            except stellar.StellarError as exc2:
++                detalle = f"{detalle}; verificación fallida: {exc2}"
++        a.estado = "error"
++        a.error_detalle = detalle[:500]
++        db.commit()
++        raise HTTPException(status_code=502, detail=detalle)
++
++    a.estado = "enviada"
++    a.horizon_hash = horizon_hash
++    a.error_detalle = None
++    db.commit()
++    db.refresh(a)
++    return _salida(a)
+diff --git a/app/routers/facturas.py b/app/routers/facturas.py
+index e69de29..106e13d 100644
+--- a/app/routers/facturas.py
++++ b/app/routers/facturas.py
+@@ -0,0 +1,55 @@
++from typing import List, Optional
++
++from fastapi import APIRouter, Depends, Header, HTTPException, Query
++from sqlalchemy.orm import Session
++
++from ..database import get_db
++from ..models import RegistroArchivo
++from ..schemas import FacturaOut, N8nRespuesta
++from ..seguridad import verificar_token
++from ..services.n8n_client import N8nError, disparar_workflow
++
++router = APIRouter(prefix="/api/facturas", tags=["Facturas"])
++
++
++def _obtener(db: Session, registro_id: int) -> RegistroArchivo:
++    registro = db.get(RegistroArchivo, registro_id)
++    if registro is None:
++        raise HTTPException(status_code=404, detail="Factura no encontrada")
++    return registro
++
++
++@router.get("", response_model=List[FacturaOut])
++def listar_facturas(estado: Optional[str] = None, db: Session = Depends(get_db)):
++    consulta = db.query(RegistroArchivo)
++    if estado:
++        consulta = consulta.filter(RegistroArchivo.estado == estado)
++    return consulta.order_by(RegistroArchivo.id).all()
++
++
++@router.get("/{registro_id}", response_model=FacturaOut)
++def obtener_factura(registro_id: int, db: Session = Depends(get_db)):
++    return _obtener(db, registro_id)
++
++
++@router.post("/{registro_id}/enviar-n8n", response_model=N8nRespuesta)
++def enviar_a_n8n(
++    registro_id: int,
++    workflow: str = Query("clasificar-factura"),
++    db: Session = Depends(get_db),
++    x_api_token: Optional[str] = Header(None),
++):
++    verificar_token(x_api_token)
++    registro = _obtener(db, registro_id)
++    try:
++        respuesta = disparar_workflow(
++            workflow,
++            {
++                "id": registro.id,
++                "nombre_archivo": registro.nombre_archivo,
++                "texto_extraido": registro.texto_extraido,
++            },
++        )
++    except N8nError as exc:
++        raise HTTPException(status_code=502, detail=str(exc))
++    return N8nRespuesta(status="enviado", detalle=respuesta)
+diff --git a/app/schemas.py b/app/schemas.py
+index e69de29..3aa6f8d 100644
+--- a/app/schemas.py
++++ b/app/schemas.py
+@@ -0,0 +1,59 @@
++from typing import Optional
++
++from pydantic import BaseModel, ConfigDict, Field
++
++
++# --- Facturas / n8n ---
++
++class FacturaOut(BaseModel):
++    model_config = ConfigDict(from_attributes=True)
++
++    id: int
++    nombre_archivo: str
++    estado: str
++    texto_extraido: Optional[str] = None
++
++
++class FacturaEnviarN8n(BaseModel):
++    registro_id: int
++    workflow: str = "clasificar-factura"
++
++
++class N8nRespuesta(BaseModel):
++    status: str
++    detalle: Optional[dict] = None
++
++
++# --- Aprobaciones Stellar ---
++
++class AprobacionCrearIn(BaseModel):
++    registro_id: int = Field(ge=1)
++    monto: float = Field(default=0, ge=0)
++
++
++class FirmaIn(BaseModel):
++    xdr_firmado: str = Field(min_length=20)
++
++
++class FirmaOut(BaseModel):
++    model_config = ConfigDict(from_attributes=True)
++
++    public_key: str
++    creado_en: str
++
++
++class AprobacionOut(BaseModel):
++    model_config = ConfigDict(from_attributes=True)
++
++    id: int
++    registro_id: int
++    estado: str
++    umbral: int
++    firmas_validas: int
++    firmantes: list[str]
++    tx_hash: str
++    xdr_base: str
++    expira_en: str
++    horizon_hash: Optional[str] = None
++    error_detalle: Optional[str] = None
++    red: str
+diff --git a/app/seguridad.py b/app/seguridad.py
+new file mode 100644
+index 0000000..1a5fbb2
+--- /dev/null
++++ b/app/seguridad.py
+@@ -0,0 +1,15 @@
++import os
++import secrets
++from typing import Optional
++
++from fastapi import HTTPException, status
++
++# Mismo valor por defecto que app/routers/webhooks.py
++_TOKEN_POR_DEFECTO = "TU_TOKEN_SECRETO_COLMENA_2026"
++
++
++def verificar_token(x_api_token: Optional[str]) -> None:
++    """Valida el header X-Api-Token contra COLMENA_API_TOKEN (401 si no coincide)."""
++    esperado = os.getenv("COLMENA_API_TOKEN", _TOKEN_POR_DEFECTO)
++    if not secrets.compare_digest((x_api_token or "").encode(), esperado.encode()):
++        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token no autorizado")
+diff --git a/app/services/n8n_client.py b/app/services/n8n_client.py
+index e69de29..88631f4 100644
+--- a/app/services/n8n_client.py
++++ b/app/services/n8n_client.py
+@@ -0,0 +1,42 @@
++import os
++
++import httpx
++
++
++class N8nError(Exception):
++    """Fallo al comunicarse con n8n."""
++
++
++def _base_url() -> str:
++    return os.getenv("N8N_BASE_URL", "http://n8n:5678").rstrip("/")
++
++
++def _timeout() -> float:
++    try:
++        return float(os.getenv("N8N_TIMEOUT", "10"))
++    except ValueError:
++        return 10.0
++
++
++def _headers() -> dict:
++    token = os.getenv("N8N_API_TOKEN")
++    if not token:
++        raise N8nError("N8N_API_TOKEN no está configurado")
++    return {"X-Api-Token": token, "Content-Type": "application/json"}
++
++
++def disparar_workflow(workflow: str, payload: dict) -> dict:
++    """Dispara un webhook de n8n y devuelve su respuesta JSON (o {} si no hay)."""
++    headers = _headers()
++    url = f"{_base_url()}/webhook/{workflow}"
++    try:
++        with httpx.Client(timeout=_timeout()) as client:
++            resp = client.post(url, json=payload, headers=headers)
++            resp.raise_for_status()
++            try:
++                data = resp.json()
++            except ValueError:
++                return {}
++            return data if isinstance(data, dict) else {"respuesta": data}
++    except httpx.HTTPError as exc:
++        raise N8nError(f"Error llamando a n8n: {exc}") from exc
+diff --git a/app/services/stellar_aprobaciones.py b/app/services/stellar_aprobaciones.py
+new file mode 100644
+index 0000000..41a2b01
+--- /dev/null
++++ b/app/services/stellar_aprobaciones.py
+@@ -0,0 +1,199 @@
++"""
++Aprobaciones multifirma (k de 3) sobre Stellar.
++
++El servidor solo maneja XDR y firmas públicas. Las llaves secretas viven en
++manos de cada socio (scripts/stellar_firmar.py). No hay llamadas de red al importar.
++"""
++import base64
++import hashlib
++import json
++import os
++from dataclasses import dataclass
++from datetime import datetime, timezone
++from typing import Optional, Tuple
++
++from stellar_sdk import Account, Keypair, Network, Server, TransactionBuilder, TransactionEnvelope
++from stellar_sdk.exceptions import BadRequestError, NotFoundError
++from stellar_sdk.decorated_signature import DecoratedSignature
++from stellar_sdk.strkey import StrKey
++
++
++class ConfigError(Exception):
++    """Configuración Stellar ausente o inválida."""
++
++
++class FirmaInvalida(Exception):
++    """La firma o el XDR recibido no es válido."""
++
++
++class StellarError(Exception):
++    """Fallo de red o respuesta de Horizon."""
++
++    def __init__(self, mensaje: str, definitivo: bool = False):
++        super().__init__(mensaje)
++        self.definitivo = definitivo  # True: Horizon rechazó la tx (no es ambiguo)
++
++
++@dataclass(frozen=True)
++class StellarConfig:
++    red: str
++    passphrase: str
++    horizon_url: str
++    cuenta: str
++    socios: Tuple[str, ...]
++    umbral: int
++    ttl_horas: int
++
++
++def parsear_socios(valor: str) -> Tuple[str, ...]:
++    socios = tuple(s.strip() for s in (valor or "").split(",") if s.strip())
++    if len(socios) != 3 or len(set(socios)) != 3:
++        raise ConfigError("STELLAR_SOCIOS debe contener exactamente 3 llaves públicas distintas")
++    for s in socios:
++        if not StrKey.is_valid_ed25519_public_key(s):
++            raise ConfigError(f"Llave pública inválida en STELLAR_SOCIOS: {s}")
++    return socios
++
++
++def passphrase_de(red: str) -> str:
++    if red == "public":
++        return Network.PUBLIC_NETWORK_PASSPHRASE
++    if red == "testnet":
++        return Network.TESTNET_NETWORK_PASSPHRASE
++    raise ConfigError("STELLAR_NETWORK debe ser 'testnet' o 'public'")
++
++
++def cargar_config() -> StellarConfig:
++    red = os.getenv("STELLAR_NETWORK", "testnet").strip().lower()
++    cuenta = os.getenv("STELLAR_CUENTA_MULTISIG", "").strip()
++    if not StrKey.is_valid_ed25519_public_key(cuenta):
++        raise ConfigError("STELLAR_CUENTA_MULTISIG ausente o inválida")
++    try:
++        umbral = int(os.getenv("STELLAR_UMBRAL", "2"))
++        ttl = int(os.getenv("APROBACION_TTL_HORAS", "72"))
++    except ValueError:
++        raise ConfigError("STELLAR_UMBRAL y APROBACION_TTL_HORAS deben ser enteros")
++    if not 1 <= umbral <= 3 or ttl < 1:
++        raise ConfigError("STELLAR_UMBRAL debe estar entre 1 y 3 y APROBACION_TTL_HORAS ser >= 1")
++    return StellarConfig(
++        red=red,
++        passphrase=passphrase_de(red),
++        horizon_url=os.getenv("STELLAR_HORIZON_URL", "https://horizon-testnet.stellar.org"),
++        cuenta=cuenta,
++        socios=parsear_socios(os.getenv("STELLAR_SOCIOS", "")),
++        umbral=umbral,
++        ttl_horas=ttl,
++    )
++
++
++def _normalizar_texto(texto: Optional[str]) -> str:
++    return " ".join((texto or "").split())
++
++
++def hash_factura(registro, monto: float) -> str:
++    canonico = json.dumps(
++        {
++            "id": registro.id,
++            "nombre_archivo": registro.nombre_archivo,
++            "texto": _normalizar_texto(registro.texto_extraido),
++            "monto": float(monto),
++        },
++        sort_keys=True,
++        separators=(",", ":"),
++        ensure_ascii=False,
++    )
++    return hashlib.sha256(canonico.encode("utf-8")).hexdigest()
++
++
++def cargar_cuenta(cfg: StellarConfig) -> Account:
++    """Lee el número de secuencia actual desde Horizon (llamada de red)."""
++    try:
++        return Server(cfg.horizon_url).load_account(cfg.cuenta)
++    except Exception as exc:
++        raise StellarError(f"No se pudo cargar la cuenta en Horizon: {exc}") from exc
++
++
++def construir_tx(cfg: StellarConfig, registro_id: int, factura_hash: str,
++                 cuenta: Optional[Account] = None) -> TransactionEnvelope:
++    """Arma la tx (manage_data con el hash de la factura). Sin `cuenta`, consulta Horizon."""
++    cuenta = cuenta or cargar_cuenta(cfg)
++    return (
++        TransactionBuilder(
++            source_account=cuenta,
++            network_passphrase=cfg.passphrase,
++            base_fee=100,
++        )
++        .append_manage_data_op(f"zne:fac:{registro_id}", bytes.fromhex(factura_hash))
++        .set_timeout(cfg.ttl_horas * 3600)
++        .build()
++    )
++
++
++def validar_firma(cfg: StellarConfig, aprobacion, xdr_firmado: str) -> Tuple[str, str]:
++    """Devuelve (public_key, firma_b64) de un socio válido o lanza FirmaInvalida."""
++    try:
++        env = TransactionEnvelope.from_xdr(xdr_firmado, cfg.passphrase)
++    except Exception as exc:
++        raise FirmaInvalida("XDR inválido") from exc
++    if env.hash_hex() != aprobacion.tx_hash:
++        raise FirmaInvalida("El XDR no corresponde a esta aprobación")
++    datos = env.hash()
++    if not env.signatures:
++        raise FirmaInvalida("El XDR no contiene firmas")
++    for firma in env.signatures:
++        for socio in cfg.socios:
++            kp = Keypair.from_public_key(socio)
++            if kp.signature_hint() != firma.signature_hint:
++                continue
++            try:
++                kp.verify(datos, firma.signature)
++            except Exception:
++                continue
++            return socio, base64.b64encode(firma.signature).decode()
++    raise FirmaInvalida("Ninguna firma válida de un socio autorizado")
++
++
++def calcular_estado(aprobacion, n_validas: int) -> str:
++    """pendiente / parcial / aprobada. Nunca recalcula enviada ni error."""
++    if aprobacion.estado in ("enviada", "error"):
++        return aprobacion.estado
++    if n_validas >= aprobacion.umbral:
++        return "aprobada"
++    return "parcial" if n_validas >= 1 else "pendiente"
++
++
++def expirada(aprobacion) -> bool:
++    exp = datetime.fromisoformat(aprobacion.expira_en)
++    if exp.tzinfo is None:
++        exp = exp.replace(tzinfo=timezone.utc)
++    return datetime.now(timezone.utc) >= exp
++
++
++def _decorada(public_key: str, firma: bytes):
++    hint = Keypair.from_public_key(public_key).signature_hint()
++    return DecoratedSignature(hint, firma)
++
++
++def enviar(cfg: StellarConfig, aprobacion) -> str:
++    """Envía la tx firmada a Horizon y devuelve su hash. Lanza StellarError."""
++    env = TransactionEnvelope.from_xdr(aprobacion.xdr_base, cfg.passphrase)
++    for f in aprobacion.firmas:
++        env.signatures.append(_decorada(f.public_key, base64.b64decode(f.firma_b64)))
++    try:
++        resp = Server(cfg.horizon_url).submit_transaction(env)
++    except BadRequestError as exc:
++        raise StellarError(f"Horizon rechazó la transacción: {exc}", definitivo=True) from exc
++    except Exception as exc:
++        raise StellarError(f"Fallo enviando a Horizon: {exc}") from exc
++    return resp.get("hash") or aprobacion.tx_hash
++
++
++def existe_en_horizon(cfg: StellarConfig, tx_hash: str) -> bool:
++    """True si Horizon ya conoce la tx. Lanza StellarError si no se puede consultar."""
++    try:
++        Server(cfg.horizon_url).transactions().transaction(tx_hash).call()
++        return True
++    except NotFoundError:
++        return False
++    except Exception as exc:
++        raise StellarError(f"No se pudo consultar Horizon: {exc}") from exc
+diff --git a/docker-compose.yml b/docker-compose.yml
+index b426dfa..9b9c49b 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -5,8 +5,9 @@ services:
+     build: .
+     container_name: colmena_backend
+     restart: always
++    env_file: .env
+     ports:
+-      - "8000:8000"
++      - "8001:8001"
+     volumes:
+       # Protege la base de datos
+       - ./data:/app/data
+diff --git a/requirements.txt b/requirements.txt
+index 720a4e3..ef2a5a2 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -2,4 +2,7 @@ fastapi
+ uvicorn[standard]
+ sqlalchemy
+ jinja2
+-python-multipart
+\ No newline at end of file
++python-multipart
++stellar-sdk>=11
++httpx
++pydantic>=2
+diff --git a/scripts/stellar_firmar.py b/scripts/stellar_firmar.py
+new file mode 100644
+index 0000000..2008dfb
+--- /dev/null
++++ b/scripts/stellar_firmar.py
+@@ -0,0 +1,36 @@
++"""
++Firma local de un socio. Uso:
++  SOCIO_SECRET=S... [STELLAR_NETWORK=testnet] python scripts/stellar_firmar.py <xdr_base>
++Imprime el XDR firmado. El secreto solo vive en memoria.
++"""
++import os
++import sys
++
++from stellar_sdk import Keypair, Network, TransactionEnvelope
++
++
++def main() -> int:
++    if len(sys.argv) != 2:
++        print("Uso: stellar_firmar.py <xdr_base>", file=sys.stderr)
++        return 1
++    secreto = os.getenv("SOCIO_SECRET")
++    if not secreto:
++        print("Falta SOCIO_SECRET", file=sys.stderr)
++        return 1
++    red = os.getenv("STELLAR_NETWORK", "testnet").strip().lower()
++    if red not in ("testnet", "public"):
++        print("STELLAR_NETWORK debe ser testnet o public", file=sys.stderr)
++        return 1
++    passphrase = Network.PUBLIC_NETWORK_PASSPHRASE if red == "public" else Network.TESTNET_NETWORK_PASSPHRASE
++    try:
++        env = TransactionEnvelope.from_xdr(sys.argv[1], passphrase)
++        env.sign(Keypair.from_secret(secreto))
++    except Exception as exc:
++        print(f"Error: {exc}", file=sys.stderr)
++        return 1
++    print(env.to_xdr())
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/scripts/stellar_setup.py b/scripts/stellar_setup.py
+new file mode 100644
+index 0000000..951df14
+--- /dev/null
++++ b/scripts/stellar_setup.py
+@@ -0,0 +1,69 @@
++"""
++Configuración única de la cuenta multifirma (ejecutar fuera del servidor).
++
++Variables de entorno (solo en memoria, nunca se escriben a disco):
++  STELLAR_SETUP_SECRET  secreto de la cuenta que se convertirá en multisig
++  STELLAR_SOCIOS        3 llaves públicas separadas por coma
++  STELLAR_NETWORK       testnet (por defecto) | public
++  STELLAR_HORIZON_URL   opcional
++Tras ejecutar: master_weight=0, umbrales=2, 3 socios con peso 1 (2 de 3).
++"""
++import os
++import sys
++
++import httpx
++from stellar_sdk import Keypair, Server, Signer, TransactionBuilder
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++from app.services.stellar_aprobaciones import ConfigError, parsear_socios, passphrase_de  # noqa: E402
++
++
++def main() -> int:
++    secreto = os.getenv("STELLAR_SETUP_SECRET")
++    if not secreto:
++        print("Falta STELLAR_SETUP_SECRET", file=sys.stderr)
++        return 1
++    red = os.getenv("STELLAR_NETWORK", "testnet").strip().lower()
++    try:
++        socios = parsear_socios(os.getenv("STELLAR_SOCIOS", ""))
++        passphrase = passphrase_de(red)
++        kp = Keypair.from_secret(secreto)
++    except (ConfigError, ValueError) as exc:
++        print(f"Configuración inválida: {exc}", file=sys.stderr)
++        return 1
++    cuenta = kp.public_key
++    if kp.public_key in socios:
++        print("La cuenta multisig no debe ser uno de los socios", file=sys.stderr)
++        return 1
++    horizon = os.getenv(
++        "STELLAR_HORIZON_URL",
++        "https://horizon-testnet.stellar.org" if red == "testnet" else "https://horizon.stellar.org",
++    )
++    server = Server(horizon)
++
++    if red == "testnet":
++        r = httpx.get("https://friendbot.stellar.org", params={"addr": cuenta}, timeout=30)
++        if r.status_code not in (200, 400):  # 400: ya estaba fondeada
++            print(f"Friendbot falló: {r.status_code}", file=sys.stderr)
++            return 1
++
++    builder = TransactionBuilder(
++        source_account=server.load_account(cuenta),
++        network_passphrase=passphrase,
++        base_fee=100,
++    )
++    for socio in socios:
++        builder.append_set_options_op(signer=Signer.ed25519_public_key(socio, 1))
++    builder.append_set_options_op(master_weight=0, low_threshold=2, med_threshold=2, high_threshold=2)
++    tx = builder.set_timeout(120).build()
++    tx.sign(kp)
++    resp = server.submit_transaction(tx)
++
++    print(f"Cuenta multisig configurada: {cuenta}")
++    print(f"Hash: {resp.get('hash')}")
++    print(f"Defina STELLAR_CUENTA_MULTISIG={cuenta} en su .env")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())

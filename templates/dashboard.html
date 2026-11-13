@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+
+{% block title %}Panel de Control - Colmena Financiera{% endblock %}
+
+{% block content %}
+{% set progreso = ((clasificados / total_archivos) * 100) | round | int if total_archivos else 0 %}
+
+<!-- Encabezado -->
+<div class="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+    <div>
+        <p class="text-sm font-semibold text-miel-600">Panel de control</p>
+        <h1 class="mt-1 text-3xl font-extrabold tracking-tight text-tinta-900">Resumen de Operaciones</h1>
+        <p class="mt-1 text-sm text-stone-500">Monitor de ingesta y clasificación automática de documentos.</p>
+    </div>
+    <button type="button"
+            class="inline-flex items-center justify-center gap-2 rounded-xl bg-tinta-900 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-tinta-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-miel-400 focus-visible:ring-offset-2"
+            onclick="alert('Llamando a subprocess...')">
+        <svg class="h-4 w-4 text-miel-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z"/></svg>
+        Ejecutar procesador manual
+    </button>
+</div>
+
+<!-- Tarjetas de métricas -->
+<div class="mb-8 grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
+
+    <div class="tarjeta p-5">
+        <div class="flex items-center justify-between">
+            <p class="text-sm font-medium text-stone-500">Total documentos</p>
+            <span class="flex h-9 w-9 items-center justify-center rounded-lg bg-sky-50 text-sky-600">
+                <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
+            </span>
+        </div>
+        <p class="mt-3 text-3xl font-bold tracking-tight text-tinta-900">{{ total_archivos }}</p>
+        <p class="mt-1 text-xs text-stone-400">Recibidos por Webhook</p>
+    </div>
+
+    <div class="tarjeta p-5">
+        <div class="flex items-center justify-between">
+            <p class="text-sm font-medium text-stone-500">Pendientes de revisión</p>
+            <span class="flex h-9 w-9 items-center justify-center rounded-lg bg-miel-100 text-miel-700">
+                <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
+            </span>
+        </div>
+        <p class="mt-3 text-3xl font-bold tracking-tight text-tinta-900">{{ pendientes }}</p>
+        <p class="mt-1 text-xs text-stone-400">En carpeta <span class="font-mono">input</span></p>
+    </div>
+
+    <div class="tarjeta p-5">
+        <div class="flex items-center justify-between">
+            <p class="text-sm font-medium text-stone-500">Clasificados</p>
+            <span class="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
+                <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
+            </span>
+        </div>
+        <p class="mt-3 text-3xl font-bold tracking-tight text-tinta-900">{{ clasificados }}</p>
+        <div class="mt-3 flex items-center gap-2">
+            <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-stone-100">
+                <div class="h-full rounded-full bg-emerald-500" style="width: {{ progreso }}%"></div>
+            </div>
+            <span class="text-xs font-medium text-stone-500">{{ progreso }}%</span>
+        </div>
+    </div>
+
+    <div class="tarjeta relative overflow-hidden border-0 bg-tinta-900 p-5">
+        <div class="bg-panal absolute inset-0 opacity-60"></div>
+        <div class="relative">
+            <div class="flex items-center justify-between">
+                <p class="text-sm font-medium text-stone-300">Reglas aprendidas</p>
+                <span class="flex h-9 w-9 items-center justify-center rounded-lg bg-miel-500/15 text-lg">🍯</span>
+            </div>
+            <p class="mt-3 text-3xl font-bold tracking-tight text-miel-300">{{ total_reglas }}</p>
+            <p class="mt-1 text-xs text-stone-400">Memoria del Foso</p>
+        </div>
+    </div>
+</div>
+
+<!-- Tabla de últimos registros -->
+<div class="tarjeta overflow-hidden">
+    <div class="flex items-center justify-between border-b border-stone-100 px-6 py-4">
+        <div>
+            <h2 class="text-base font-semibold text-tinta-900">Últimos archivos procesados</h2>
+            <p class="text-xs text-stone-400">Los 5 documentos más recientes</p>
+        </div>
+    </div>
+
+    <div class="overflow-x-auto">
+        <table class="w-full text-left text-sm">
+            <thead>
+                <tr class="bg-stone-50/80 text-xs font-semibold uppercase tracking-wider text-stone-500">
+                    <th class="px-6 py-3">ID</th>
+                    <th class="px-6 py-3">Archivo</th>
+                    <th class="px-6 py-3">Estado</th>
+                    <th class="px-6 py-3">Texto extraído</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-stone-100 text-stone-700">
+                {% for archivo in ultimos_archivos %}
+                <tr class="transition hover:bg-miel-50/50">
+                    <td class="px-6 py-4 font-mono text-xs text-stone-400">#{{ archivo.id }}</td>
+                    <td class="px-6 py-4">
+                        <div class="flex items-center gap-3">
+                            {% set nombre = archivo.nombre_archivo | lower %}
+                            <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-stone-100 text-sm">
+                                {% if nombre.endswith(('.ogg', '.mp3', '.m4a', '.wav', '.opus')) %}🎙️
+                                {% elif nombre.endswith(('.jpg', '.jpeg', '.png', '.webp')) %}🖼️
+                                {% elif nombre.endswith('.pdf') %}📄
+                                {% else %}📁{% endif %}
+                            </span>
+                            <span class="max-w-xs truncate font-medium text-tinta-800" title="{{ archivo.nombre_archivo }}">{{ archivo.nombre_archivo }}</span>
+                        </div>
+                    </td>
+                    <td class="px-6 py-4">
+                        {% if archivo.estado == 'check' %}
+                            <span class="badge bg-emerald-50 text-emerald-700 ring-emerald-600/20"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Clasificado</span>
+                        {% elif archivo.estado == 'input' %}
+                            <span class="badge bg-miel-50 text-miel-700 ring-miel-600/20"><span class="h-1.5 w-1.5 rounded-full bg-miel-500"></span>Pendiente</span>
+                        {% else %}
+                            <span class="badge bg-stone-50 text-stone-600 ring-stone-500/20"><span class="h-1.5 w-1.5 rounded-full bg-stone-400"></span>{{ archivo.estado }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="max-w-sm truncate px-6 py-4 text-stone-500" title="{{ archivo.texto_extraido }}">
+                        {% if archivo.texto_extraido %}{{ archivo.texto_extraido[:60] }}{% if archivo.texto_extraido | length > 60 %}…{% endif %}{% else %}<span class="italic text-stone-300">Sin texto</span>{% endif %}
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="4" class="px-6 py-16">
+                        <div class="flex flex-col items-center text-center">
+                            <span class="flex h-14 w-14 items-center justify-center rounded-2xl bg-miel-100 text-2xl">🐝</span>
+                            <p class="mt-4 font-semibold text-tinta-900">La colmena está vacía</p>
+                            <p class="mt-1 text-sm text-stone-500">No hay documentos registrados aún. Envíalos a través del Webhook.</p>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

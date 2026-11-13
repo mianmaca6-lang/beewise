@@ -1,0 +1,16 @@
+[package]
+name = "libro_personal"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Pruebas de integridad (hash) de registros financieros personales. Sin datos financieros on-chain."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
